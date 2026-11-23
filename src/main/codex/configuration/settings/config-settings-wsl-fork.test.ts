@@ -12,6 +12,7 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import type * as Os from 'node:os'
 import { join } from 'node:path'
+import { parse as parseToml } from 'smol-toml'
 import type * as WslPaths from '../../../../shared/file-access/wsl-paths'
 
 const { homedirMock, forkTestState } = vi.hoisted(() => {
@@ -156,20 +157,40 @@ describe('managed Codex config for a WSL guest config', () => {
     expect(readRuntimeConfig()).toContain('status_line = ["cwd"]')
   })
 
-  it('still applies a distro project revocation to an edited managed copy', () => {
-    const trusted = '[projects."/home/u/repo"]\ntrust_level = "trusted"\n'
-    writeSystemConfig(`model = "gpt-5"\n\n${trusted}`)
+  it('drops trust the distro withdrew from an edited copy, and never adds any', () => {
+    writeSystemConfig(
+      'model = "gpt-5"\n\n[projects."/home/u/a"]\ntrust_level = "trusted"\n\n[projects."/home/u/b"]\ntrust_level = "trusted"\n'
+    )
     forkTestState.wslPath = systemConfigPath()
     syncSystemConfigIntoManagedCodexHome()
     simulateCodexSettingWrite('model', '"o4"')
     syncSystemConfigIntoManagedCodexHome()
 
-    writeSystemConfig(`model = "gpt-5"\n\n${trusted.replace('"trusted"', '"untrusted"')}`)
+    writeSystemConfig(
+      'model = "gpt-5"\n\n[projects."/home/u/a"]\ntrust_level = "untrusted"\n\n[projects."/home/u/c"]\ntrust_level = "trusted"\n'
+    )
     syncSystemConfigIntoManagedCodexHome()
 
-    expect(readRuntimeConfig()).toContain('trust_level = "untrusted"')
-    expect(readRuntimeConfig()).not.toContain('trust_level = "trusted"')
-    expect(readRuntimeConfig()).toContain('model = "o4"')
+    const managed = parseToml(readRuntimeConfig())
+    expect(managed.model).toBe('o4')
+    expect(managed.projects).toBeUndefined()
+  })
+
+  it('drops withdrawn trust an edited copy inherited as an inline projects map', () => {
+    writeSystemConfig(
+      'model = "gpt-5"\nprojects = { "/home/u/a" = { trust_level = "trusted" }, "/home/u/b" = { trust_level = "trusted" } }\n'
+    )
+    forkTestState.wslPath = systemConfigPath()
+    syncSystemConfigIntoManagedCodexHome()
+    simulateCodexSettingWrite('model', '"o4"')
+    syncSystemConfigIntoManagedCodexHome()
+
+    writeSystemConfig('model = "gpt-5"\n\n[projects."/home/u/b"]\ntrust_level = "trusted"\n')
+    syncSystemConfigIntoManagedCodexHome()
+
+    const managed = parseToml(readRuntimeConfig())
+    expect(managed.model).toBe('o4')
+    expect(managed.projects).toEqual({ '/home/u/b': { trust_level: 'trusted' } })
   })
 
   it.skipIf(process.platform === 'win32')(

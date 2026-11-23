@@ -22,8 +22,10 @@ export type CodexSettingsBaseline = {
   mcpServerRoot: boolean
   /** The managed config holds user edits that cannot be written back, so the mirror leaves it alone. */
   forked?: boolean
-  /** Digests of promoted values that were multiline when mirrored; `settings` tracks single lines only. */
-  multilineSettings?: ReadonlyMap<string, string>
+  /** Digest of the user-owned part of the config the last mirror published (see wsl fork). */
+  userConfigDigest?: string
+  /** Revocation keys of projects the source trusted at the last mirror. */
+  inheritedTrustedProjects?: ReadonlySet<string>
 }
 
 type StoredSettingsBaseline = {
@@ -34,7 +36,8 @@ type StoredSettingsBaseline = {
   mcpServers?: string[]
   mcpServerRoot?: boolean
   forked?: boolean
-  multilineSettings?: Record<string, string>
+  userConfigDigest?: string
+  inheritedTrustedProjects?: string[]
 }
 
 /** Unreadable baselines stall the mirror; absent or invalid baselines can be rebuilt. */
@@ -91,9 +94,11 @@ function readParsedCodexSettingsBaseline(
       // Older mirrors owned the whole MCP root; retain that removal policy for one pass.
       mcpServerRoot: parsed.mcpServers === undefined || parsed.mcpServerRoot === true,
       forked: parsed.forked === true,
-      multilineSettings: new Map(
-        Object.entries(parsed.multilineSettings ?? {}).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string'
+      userConfigDigest:
+        typeof parsed.userConfigDigest === 'string' ? parsed.userConfigDigest : undefined,
+      inheritedTrustedProjects: new Set(
+        (parsed.inheritedTrustedProjects ?? []).filter(
+          (key): key is string => typeof key === 'string'
         )
       )
     }
@@ -158,8 +163,11 @@ export function writeCodexSettingsBaseline(
   if (baseline.forked) {
     file.forked = true
   }
-  if (baseline.multilineSettings && baseline.multilineSettings.size > 0) {
-    file.multilineSettings = Object.fromEntries(baseline.multilineSettings)
+  if (baseline.userConfigDigest !== undefined) {
+    file.userConfigDigest = baseline.userConfigDigest
+  }
+  if (baseline.inheritedTrustedProjects && baseline.inheritedTrustedProjects.size > 0) {
+    file.inheritedTrustedProjects = [...baseline.inheritedTrustedProjects]
   }
   const baselinePath = getCodexSettingsBaselinePath(runtimeHomePath)
   const serialized = `${JSON.stringify(file, null, 2)}\n`

@@ -15,10 +15,8 @@ import {
   prepareSystemConfigForRuntimeMirror,
   resolveCodexConfigMirrorSourceDirectory
 } from './codex-config-mirror-source'
-import {
-  applySystemProjectRevocations,
-  mergeSystemCodexConfigIntoRuntime
-} from './codex-config-mirror-merge'
+import { mergeSystemCodexConfigIntoRuntime } from './codex-config-mirror-merge'
+import { dropRevokedInheritedTrust } from './codex-config-forked-trust'
 
 // Mirrored MCP environment tokens require owner-only writes.
 const RUNTIME_CONFIG_WRITE = { mode: 0o600 } as const
@@ -53,9 +51,10 @@ export function syncSystemConfigIntoLegacySharedCodexHome(
       ? readLegacySharedHomeOwnership(homes.runtimeHomePath)
       : null
   if (legacyOwnership?.forked && runtimeConfigBeforeMirror !== null) {
-    mirroredRuntimeConfig = applySystemProjectRevocations(
+    mirroredRuntimeConfig = dropRevokedInheritedTrust(
       runtimeConfigBeforeMirror,
-      rawSystemConfig
+      rawSystemConfig,
+      legacyOwnership.inheritedTrustedProjects
     )
   } else if (rawSystemConfig.trim() !== '') {
     const sourceConfigDir = resolveCodexConfigMirrorSourceDirectory(homes.systemHomePath)
@@ -105,6 +104,7 @@ function readLegacySharedHomeOwnership(runtimeHomePath: string): {
   mcpServers: ReadonlySet<string>
   mcpServerRoot: boolean
   forked: boolean
+  inheritedTrustedProjects: ReadonlySet<string>
 } {
   const observation = observeCodexSettingsBaseline(runtimeHomePath)
   if (observation.kind === 'indeterminate') {
@@ -114,7 +114,13 @@ function readLegacySharedHomeOwnership(runtimeHomePath: string): {
     ? {
         mcpServers: observation.baseline.mcpServers,
         mcpServerRoot: observation.baseline.mcpServerRoot,
-        forked: observation.baseline.forked === true
+        forked: observation.baseline.forked === true,
+        inheritedTrustedProjects: observation.baseline.inheritedTrustedProjects ?? new Set()
       }
-    : { mcpServers: new Set(), mcpServerRoot: true, forked: false }
+    : {
+        mcpServers: new Set(),
+        mcpServerRoot: true,
+        forked: false,
+        inheritedTrustedProjects: new Set()
+      }
 }

@@ -23,10 +23,8 @@ import {
   prepareSystemConfigForRuntimeMirror,
   resolveCodexConfigMirrorSourceDirectory
 } from './codex-config-mirror-source'
-import {
-  applySystemProjectRevocations,
-  mergeSystemCodexConfigIntoRuntime
-} from './codex-config-mirror-merge'
+import { mergeSystemCodexConfigIntoRuntime } from './codex-config-mirror-merge'
+import { dropRevokedInheritedTrust, readTrustedProjectKeys } from './codex-config-forked-trust'
 
 // Mirrored MCP environment tokens require owner-only writes.
 const RUNTIME_CONFIG_WRITE = { mode: 0o600 } as const
@@ -61,7 +59,10 @@ function mirrorSystemConfigIntoManagedCodexHome(homes: CodexSettingsPromotionHom
     return { ran: false, complete: false }
   }
   if (promotionPlan.forked) {
-    return { ran: refreshForkedManagedConfig(homes), complete: true }
+    return {
+      ran: refreshForkedManagedConfig(homes, promotionPlan.inheritedTrustedProjects ?? new Set()),
+      complete: true
+    }
   }
   let mirrorResult: CodexConfigMirrorResult
   try {
@@ -101,7 +102,8 @@ function mirrorSystemConfigIntoManagedCodexHome(homes: CodexSettingsPromotionHom
     mirroredRegistrations: true,
     mirroredMcpServers: mirrorResult.mirroredMcpServerNames,
     mirroredMcpServerRoot: mirrorResult.mirroredMcpServerRoot,
-    publishedConfig: mirrorResult.publishedConfig
+    publishedConfig: mirrorResult.publishedConfig,
+    inheritedTrustedProjects: mirrorResult.inheritedTrustedProjects
   })
   return { ran: true, complete }
 }
@@ -121,7 +123,10 @@ export function ensureCodexDaemonSocketGuard(runtimeHomePath: string): void {
 }
 
 /** The user owns a forked copy: only Orca's own lines and source project revocations change it. */
-function refreshForkedManagedConfig(homes: CodexSettingsPromotionHomes): boolean {
+function refreshForkedManagedConfig(
+  homes: CodexSettingsPromotionHomes,
+  inheritedTrustedProjects: ReadonlySet<string>
+): boolean {
   try {
     const runtime = observeAgentStateFile(join(homes.runtimeHomePath, 'config.toml'))
     const system = observeAgentStateFile(join(homes.systemHomePath, 'config.toml'))
@@ -132,7 +137,7 @@ function refreshForkedManagedConfig(homes: CodexSettingsPromotionHomes): boolean
       homes.runtimeHomePath,
       runtime.value,
       system.kind === 'present'
-        ? applySystemProjectRevocations(runtime.value, system.value)
+        ? dropRevokedInheritedTrust(runtime.value, system.value, inheritedTrustedProjects)
         : runtime.value
     )
     return true
@@ -168,6 +173,7 @@ type CodexConfigMirrorResult =
       mirroredMcpServerNames: ReadonlySet<string>
       mirroredMcpServerRoot: boolean
       publishedConfig?: string
+      inheritedTrustedProjects?: ReadonlySet<string>
     }
 
 function syncSystemConfigIntoManagedCodexHomeUnsafe(
@@ -236,7 +242,8 @@ function syncSystemConfigIntoManagedCodexHomeUnsafe(
       preservedConflictKeys: new Set(),
       mirroredMcpServerNames: ownership.names,
       mirroredMcpServerRoot: ownership.ownsRoot,
-      publishedConfig: freshRuntimeConfig
+      publishedConfig: freshRuntimeConfig,
+      inheritedTrustedProjects: readTrustedProjectKeys(rawSystemConfig)
     }
   }
 
@@ -284,6 +291,7 @@ function syncSystemConfigIntoManagedCodexHomeUnsafe(
     preservedConflictKeys: preserved.keys,
     mirroredMcpServerNames,
     mirroredMcpServerRoot,
-    publishedConfig: nextRuntimeConfig
+    publishedConfig: nextRuntimeConfig,
+    inheritedTrustedProjects: readTrustedProjectKeys(rawSystemConfig)
   }
 }

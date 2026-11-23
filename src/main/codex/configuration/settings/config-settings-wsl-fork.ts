@@ -1,62 +1,57 @@
-import { observeAgentStateFile } from '../codex-path-observation'
+import { createHash } from 'node:crypto'
+import {
+  getTomlSections,
+  isRuntimePreservedTomlSection,
+  joinTomlBlocks
+} from '../toml/config-toml-runtime-owned-sections'
+import { stripCodexDaemonOverride } from '../shared-server/codex-daemon-socket-path-guard'
+import { stripCodexSharedSqliteHome } from '../toml/config-toml-shared-sqlite-home'
 import type { TopLevelSettingValue } from '../toml/config-toml-promoted-setting-values'
 import { writeCodexSettingsBaseline, type CodexSettingsBaseline } from './config-settings-baseline'
-import { hasCodexRegistrationUserEdits } from './config-plugin-registration-promotion'
 import type { CodexSettingsPromotionPlan } from './config-settings-promotion'
 
-export type GuestForkCheck = {
-  runtimeHomePath: string
-  runtimeConfig: string
-  guestConfigPath: string
-  settingsEdited: boolean
-  baseline: CodexSettingsBaseline | null
-  plan: CodexSettingsPromotionPlan
+/** The user's part of a managed config: everything but trust, Codex bookkeeping and Orca's own lines. */
+export function digestCodexUserOwnedConfig(config: string): string {
+  const stripped = stripCodexSharedSqliteHome(stripCodexDaemonOverride(config))
+  const sections = getTomlSections(stripped)
+  const preamble =
+    sections.length === 0 ? stripped : stripped.split('\n').slice(0, sections[0]?.start).join('\n')
+  const userOwned = joinTomlBlocks([
+    preamble,
+    ...sections.filter((section) => !isRuntimePreservedTomlSection(section)).map((s) => s.block)
+  ])
+  return createHash('sha256').update(userOwned).digest('hex')
 }
 
 /** Orca can't write a WSL guest's config back, so a user edit makes the managed copy the user's own. */
-export function forkOnUserEdits(check: GuestForkCheck): CodexSettingsPromotionPlan {
-  if (!check.settingsEdited) {
-    const guest = observeAgentStateFile(check.guestConfigPath)
-    if (guest.kind === 'indeterminate') {
-      throw guest.error
-    }
-    const guestConfig = guest.kind === 'present' ? guest.value : ''
-    const registrations = check.baseline?.registrations ?? new Map()
-    if (!hasCodexRegistrationUserEdits(check.runtimeConfig, guestConfig, registrations)) {
-      return check.plan
-    }
-  }
-  // Keep the ancestry so an older build reading this baseline still sees what was mirrored.
-  writeCodexSettingsBaseline(check.runtimeHomePath, {
-    settings: check.baseline?.settings ?? new Map(),
-    conflicts: check.baseline?.conflicts ?? new Map(),
-    registrations: check.baseline?.registrations ?? new Map(),
-    mcpServers: check.baseline?.mcpServers ?? new Set(),
-    mcpServerRoot: check.baseline?.mcpServerRoot ?? false,
-    multilineSettings: check.baseline?.multilineSettings,
+export function forkManagedConfig(
+  runtimeHomePath: string,
+  baseline: CodexSettingsBaseline | null
+): CodexSettingsPromotionPlan {
+  const forked: CodexSettingsBaseline = {
+    settings: baseline?.settings ?? new Map(),
+    conflicts: baseline?.conflicts ?? new Map(),
+    // Kept so an older build reading this baseline still sees what was mirrored.
+    registrations: baseline?.registrations ?? new Map(),
+    mcpServers: baseline?.mcpServers ?? new Set(),
+    mcpServerRoot: baseline?.mcpServerRoot ?? false,
+    userConfigDigest: baseline?.userConfigDigest,
+    inheritedTrustedProjects: baseline?.inheritedTrustedProjects,
     forked: true
-  })
-  return { ...check.plan, conflicts: new Map(), runtimeValuesToPreserve: new Map(), forked: true }
+  }
+  writeCodexSettingsBaseline(runtimeHomePath, forked)
+  return forkedPromotionPlan(forked)
 }
 
-/** Any change to a mirrored value, deletions included, even where a later source edit would win. */
-export function hasTrackedSettingEdits(
-  baseline: CodexSettingsBaseline,
-  runtimeValues: ReadonlyMap<string, TopLevelSettingValue>,
-  runtimeMultilineDigests: ReadonlyMap<string, string>
-): boolean {
-  for (const [key, mirroredRaw] of baseline.settings) {
-    // The baseline's single-line values never match a multiline one, so that is an edit too.
-    if (!baseline.conflicts.has(key) && getComparableRaw(runtimeValues.get(key)) !== mirroredRaw) {
-      return true
-    }
+export function forkedPromotionPlan(baseline: CodexSettingsBaseline): CodexSettingsPromotionPlan {
+  return {
+    conflicts: new Map(),
+    runtimeValuesToPreserve: new Map(),
+    mirroredMcpServers: new Set(),
+    mirroredMcpServerRoot: false,
+    forked: true,
+    inheritedTrustedProjects: baseline.inheritedTrustedProjects ?? new Set()
   }
-  for (const [key, mirroredDigest] of baseline.multilineSettings ?? []) {
-    if (!baseline.conflicts.has(key) && runtimeMultilineDigests.get(key) !== mirroredDigest) {
-      return true
-    }
-  }
-  return false
 }
 
 export function getComparableRaw(

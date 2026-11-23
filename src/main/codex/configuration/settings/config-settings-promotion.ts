@@ -12,7 +12,6 @@ import {
   PROMOTED_STRUCTURED_KEYS,
   readPromotedSettingValues,
   readPromotedSettingValuesFromContent,
-  readMultilinePromotedSettingDigests,
   type TopLevelSettingValue
 } from '../toml/config-toml-promoted-setting-values'
 import {
@@ -30,9 +29,10 @@ import {
 } from './config-plugin-registration-promotion'
 import { hasCodexRegistrationEntries } from '../toml/config-toml-plugin-registration-tables'
 import {
-  forkOnUserEdits,
-  getComparableRaw,
-  hasTrackedSettingEdits
+  digestCodexUserOwnedConfig,
+  forkedPromotionPlan,
+  forkManagedConfig,
+  getComparableRaw
 } from './config-settings-wsl-fork'
 
 export type CodexSettingsBaselineSnapshotOptions = {
@@ -44,6 +44,8 @@ export type CodexSettingsBaselineSnapshotOptions = {
   mirroredMcpServerRoot?: boolean
   /** What this pass published: the baseline describes it, so a save since then reads as an edit. */
   publishedConfig?: string
+  /** Projects the source trusted in this pass, so a later source revocation can reach a fork. */
+  inheritedTrustedProjects?: ReadonlySet<string>
 }
 
 /** Snapshot only after a successful mirror so pending runtime changes remain promotable. */
@@ -78,7 +80,8 @@ export function snapshotCodexRuntimeSettingsBaseline(
         : new Map(),
       mcpServers: options.mirroredMcpServers ?? new Set(),
       mcpServerRoot: options.mirroredMcpServerRoot ?? false,
-      multilineSettings: readMultilinePromotedSettingDigests(runtimeConfig)
+      userConfigDigest: digestCodexUserOwnedConfig(runtimeConfig),
+      inheritedTrustedProjects: options.inheritedTrustedProjects
     })
     return true
   } catch (error) {
@@ -104,6 +107,8 @@ export type CodexSettingsPromotionPlan = {
   forked?: boolean
   /** The managed config this plan was computed from; the mirror defers if it changed since. */
   observedRuntimeConfig?: string | null
+  /** For a fork: projects the source trusted when it was last mirrored. */
+  inheritedTrustedProjects?: ReadonlySet<string>
 }
 
 function getHostPromotionHomes(): CodexSettingsPromotionHomes {
@@ -166,7 +171,7 @@ function promoteCodexRuntimeSettingsToSystemUnsafe(
   }
   const baseline = baselineObservation.kind === 'present' ? baselineObservation.baseline : null
   if (baseline?.forked) {
-    return { ...emptyPromotionPlan(), forked: true }
+    return forkedPromotionPlan(baseline)
   }
   const unchangedPlan = (): CodexSettingsPromotionPlan => ({
     conflicts,
@@ -178,45 +183,34 @@ function promoteCodexRuntimeSettingsToSystemUnsafe(
   const updates = new Map<string, string>()
   const conflicts = new Map<string, CodexSettingsConflict>()
   const runtimeValuesToPreserve = new Map<string, string | null>()
-  let settingsEdited = false
   if (baseline) {
-    const runtimeValues = readPromotedSettingValuesFromContent(runtimeTomlObservation.value)
     collectPromotionChanges({
       baseline,
-      runtimeValues,
+      runtimeValues: readPromotedSettingValuesFromContent(runtimeTomlObservation.value),
       systemValues: readPromotedSettingValues(systemTomlPath),
       updates,
       conflicts,
       runtimeValuesToPreserve
     })
-    settingsEdited =
-      updates.size > 0 ||
-      hasTrackedSettingEdits(
-        baseline,
-        runtimeValues,
-        readMultilinePromotedSettingDigests(runtimeTomlObservation.value)
-      )
   }
-  // Registrations can promote before the first mirror because untracked tables are additions;
-  // a removed last registration still needs the guest check below.
+  // Anything the user changed since the last mirror published this copy, Orca's own lines aside.
+  const userEdited =
+    baseline?.userConfigDigest !== undefined &&
+    digestCodexUserOwnedConfig(runtimeTomlObservation.value) !== baseline.userConfigDigest
+  // Registrations can promote before the first mirror because untracked tables are additions.
   if (
-    !settingsEdited &&
-    !hasCodexRegistrationEntries(runtimeTomlObservation.value) &&
-    (baseline?.registrations.size ?? 0) === 0
+    !userEdited &&
+    updates.size === 0 &&
+    !hasCodexRegistrationEntries(runtimeTomlObservation.value)
   ) {
     return unchangedPlan()
   }
   const writeTarget = resolvePromotionWriteTarget(systemTomlPath)
   // Orca never writes a WSL guest's own config, including through a host dotfile link into one.
-  if (parseWslUncPath(systemTomlPath) !== null || parseWslUncPath(writeTarget.path) !== null) {
-    return forkOnUserEdits({
-      runtimeHomePath,
-      runtimeConfig: runtimeTomlObservation.value,
-      guestConfigPath: writeTarget.path,
-      settingsEdited,
-      baseline,
-      plan: unchangedPlan()
-    })
+  const guestTarget =
+    parseWslUncPath(systemTomlPath) !== null || parseWslUncPath(writeTarget.path) !== null
+  if (guestTarget && userEdited) {
+    return forkManagedConfig(runtimeHomePath, baseline)
   }
   // Read the target before reconstructing it; registration promotion can run without a baseline.
   const writeTargetObservation = observeAgentStateFile(writeTarget.path)
@@ -241,6 +235,12 @@ function promoteCodexRuntimeSettingsToSystemUnsafe(
   )
   if (nextContent === systemContent) {
     return unchangedPlan()
+  }
+  if (guestTarget) {
+    // A baseline from before user-edit tracking: an edit shows only as a pending write-back.
+    return baseline?.userConfigDigest === undefined
+      ? forkManagedConfig(runtimeHomePath, baseline)
+      : unchangedPlan()
   }
   // A new home may later hold auth.json, so create it owner-only.
   mkdirSync(systemHomePath, { recursive: true, mode: 0o700 })

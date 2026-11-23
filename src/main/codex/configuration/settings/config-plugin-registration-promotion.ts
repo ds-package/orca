@@ -60,37 +60,6 @@ export function planCodexRegistrationPromotion(
   return [...appends.marketplaces, ...appends.plugins, ...fields]
 }
 
-/** A user-made addition, removal or plugin toggle since the last mirror; refresh metadata is Codex's own. */
-export function hasCodexRegistrationUserEdits(
-  runtimeConfig: string,
-  systemConfig: string,
-  mirroredRegistrations: CodexRegistrationBaseline
-): boolean {
-  const runtimeEntries = readCodexRegistrationEntries(runtimeConfig)
-  const systemEntries = readCodexRegistrationEntries(systemConfig)
-  for (const entry of runtimeEntries.values()) {
-    const mirrored = mirroredRegistrations.get(entry.key)
-    if (!mirrored) {
-      if (!systemEntries.has(entry.key)) {
-        return true
-      }
-      continue
-    }
-    if (
-      entry.root === 'plugins' &&
-      readNormalizedField(entry, 'enabled') !== (mirrored.get('enabled') ?? null)
-    ) {
-      return true
-    }
-  }
-  for (const key of mirroredRegistrations.keys()) {
-    if (!runtimeEntries.has(key)) {
-      return true
-    }
-  }
-  return false
-}
-
 export function applyCodexRegistrationPromotions(
   content: string,
   promotions: readonly CodexRegistrationPromotion[]
