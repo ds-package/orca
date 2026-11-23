@@ -63,9 +63,10 @@ export function dropRevokedInheritedTrust(
     const projects: Record<string, Record<string, unknown>> = {}
     for (const [key, path, entry] of entries) {
       const { trust_level: trustLevel, ...rest } = entry
-      const kept = revoked.has(key) && trustLevel === 'trusted' ? rest : entry
-      if (Object.keys(kept).length > 0) {
-        projects[path] = kept
+      const withdrawn = revoked.has(key) && trustLevel === 'trusted'
+      // Only an entry emptied by this revocation goes; other entries stay as written.
+      if (!withdrawn || Object.keys(rest).length > 0) {
+        projects[path] = withdrawn ? rest : entry
       }
     }
     lines.splice(range.start, range.end - range.start)
@@ -84,7 +85,7 @@ export function dropRevokedInheritedTrust(
       continue
     }
     const [header = '', ...body] = section.block.split('\n')
-    const keptBody = body.filter((line) => !/^\s*trust_level\s*=/.test(line))
+    const keptBody = withoutTrustLevelAssignments(body)
     const empty = keptBody.every((line) => line.trim() === '' || line.trim().startsWith('#'))
     tableLines.splice(
       section.start,
@@ -94,6 +95,26 @@ export function dropRevokedInheritedTrust(
   }
   const next = joinTrustEdits(tableLines.join('\n'), appended)
   return next === runtimeConfig ? runtimeConfig : next
+}
+
+/** Drops `trust_level` keys (bare or quoted) but never a line inside a multiline value. */
+function withoutTrustLevelAssignments(body: readonly string[]): string[] {
+  const kept: string[] = []
+  let state = createTomlLineScanState()
+  for (const line of body) {
+    const structural = isTomlStructuralLine(state)
+    state = updateTomlLineScanState(state, line)
+    const parsed = structural ? parseTomlKeyPath(line) : null
+    const isTrustLevel =
+      parsed !== null &&
+      line[parsed.end] === '=' &&
+      parsed.segments.length === 1 &&
+      parsed.segments[0] === 'trust_level'
+    if (!isTrustLevel) {
+      kept.push(line)
+    }
+  }
+  return kept
 }
 
 function joinTrustEdits(config: string, appended: readonly string[]): string {
